@@ -50,6 +50,9 @@
 
 <!-- ============ PORTAL ============ -->
 <main id="viewApp" class="wrap" hidden>
+  <div id="offlineNotice" class="notice warn" role="status" hidden style="margin-bottom:16px">
+    <b>No internet connection.</b> Your scores are kept on this device and will be saved automatically when the connection is back. Please keep this page open.
+  </div>
   <div id="closedNotice" class="notice warn" hidden style="margin-bottom:16px">
     Judging is currently closed by the organizing team. You can read your evaluations but not change them.
   </div>
@@ -88,8 +91,40 @@
   var S = { session: null, data: null, evals: {}, current: null, lastLoad: 0 };
   var chain = Promise.resolve();      // saves run one after another, never in parallel
   var saveTimer = null;
+  var retryTimer = null;
 
   function token() { return S.session ? S.session.token : null; }
+
+  // ---------------- local backup of unsaved work ----------------
+  // Scores that have not reached the server yet are also kept in this browser (per judge), so a dropped
+  // connection, a closed tab or an expired session does not lose them. An entry is removed once it is saved.
+  function cacheKey() { var u = S.session && S.session.user; return u ? "kz_judge_unsaved_" + (u.username || u.id) : null; }
+  function readCache() {
+    var k = cacheKey(); if (!k) return {};
+    try { return JSON.parse(localStorage.getItem(k) || "{}") || {}; } catch (e) { return {}; }
+  }
+  function writeCache() {
+    var k = cacheKey(); if (!k) return;
+    var out = {}, n = 0;
+    Object.keys(S.evals).forEach(function (code) {
+      var ev = S.evals[code];
+      if (ev.dirty && ev.status !== "submitted") { out[code] = { scores: ev.scores, comments: ev.comments, notes: ev.notes, at: Date.now() }; n++; }
+    });
+    try { if (n) localStorage.setItem(k, JSON.stringify(out)); else localStorage.removeItem(k); } catch (e) { /* storage full or blocked */ }
+  }
+  function anyDirty() { return Object.keys(S.evals).some(function (c) { return S.evals[c].dirty; }); }
+  function retryAll() {
+    clearTimeout(retryTimer); retryTimer = null;
+    if (!S.session || !S.data) return;
+    Object.keys(S.evals).forEach(function (code) { if (S.evals[code].dirty) queueSave(code); });
+  }
+  function updateOnline() {
+    var off = navigator.onLine === false, n = $("#offlineNotice");
+    if (n) n.hidden = !off;
+    if (!off && anyDirty()) retryAll();
+  }
+  window.addEventListener("online", updateOnline);
+  window.addEventListener("offline", updateOnline);
 
   // ---------------- sign in / out ----------------
   function showLogin(msg) {
@@ -152,6 +187,17 @@
         var loc = S.evals[code];
         if (loc.dirty && (!fresh[code] || fresh[code].status !== "submitted")) fresh[code] = loc;
       });
+      // bring back work that was kept on this device but never reached the server
+      var cached = readCache(), restored = [];
+      Object.keys(cached).forEach(function (code) {
+        var c = cached[code], f = fresh[code];
+        if (!d.projects.some(function (p) { return p.code === code; })) return;
+        if (f && (f.status === "submitted" || f.dirty)) return;
+        if (f && f.updated_at && c.at < Date.parse(f.updated_at) - 120000) return;   // the server copy is newer
+        fresh[code] = { scores: c.scores || {}, comments: c.comments || {}, notes: c.notes || "", status: "draft",
+          total: f ? f.total : 0, updated_at: f ? f.updated_at : null, submitted_at: null, dirty: true };
+        restored.push(code);
+      });
       S.evals = fresh;
       if (S.current && !project(S.current)) S.current = null;
       $("#viewLogin").hidden = true; $("#viewApp").hidden = false; $("#topRight").hidden = false;
@@ -162,6 +208,12 @@
       renderList();
       renderForm();
       if (first) window.scrollTo(0, 0);
+      updateOnline();
+      writeCache();
+      if (restored.length) {
+        restored.forEach(function (code) { queueSave(code); });
+        KZ.toast("Unsaved scores from this device were restored and are being saved.");
+      }
     }).catch(function (e) {
       if (first || (e && e.code === "KZ_SESSION")) showLogin(e.message); else fail(e);
     });
@@ -304,7 +356,7 @@
     el.innerHTML = kind === "saving" ? "Saving..."
       : kind === "pending" ? "Unsaved changes..."
       : kind === "saved" ? "Draft saved at " + KZ.time(when)
-      : kind === "error" ? 'Not saved. <button type="button" class="btn link" id="btnRetry">Try again</button>'
+      : kind === "error" ? 'Not saved yet, retrying automatically. Your scores are kept on this device. <button type="button" class="btn link" id="btnRetry">Try now</button>'
       : "";
   }
 
@@ -334,7 +386,7 @@
       return;
     }
     if (e.target.id === "btnSubmit") return submitCurrent();
-    if (e.target.id === "btnRetry") return flushCurrent();
+    if (e.target.id === "btnRetry") return retryAll();
     if (e.target.id === "btnNext") {
       var next = S.data.projects.filter(function (p) { return statusOf(p.code) !== "submitted"; })[0];
       if (next) openProject(next.code); else { $("#grid").classList.remove("show-form"); KZ.toast("All evaluations are submitted."); }
@@ -358,6 +410,7 @@
   // ---------------- saving ----------------
   function scheduleSave() {
     clearTimeout(saveTimer);
+    writeCache();
     setSaveState("pending");
     saveTimer = setTimeout(flushCurrent, 800);
   }
@@ -378,10 +431,18 @@
       .then(function (r) {
         ev.updated_at = r.updated_at; ev.total = Number(r.total); ev.status = r.status;
         if (code === S.current && !ev.dirty) setSaveState("saved", new Date());
+        writeCache();
         renderList();
       }, function (e) {
         ev.dirty = true;
+        writeCache();
         if (code === S.current) setSaveState("error");
+        if (e && (e.code === "NETWORK" || e.code === "SERVER")) {
+          // keep trying quietly; the save line and the offline notice tell the judge what is happening
+          updateOnline();
+          if (!retryTimer && navigator.onLine !== false) retryTimer = setTimeout(retryAll, 6000);
+          return;
+        }
         fail(e);
       });
   }
@@ -411,6 +472,7 @@
         }).then(function (r) {
           ev.dirty = false; ev.status = r.status; ev.total = Number(r.total); ev.comments = r.comments || ev.comments;
           ev.updated_at = r.updated_at; ev.submitted_at = r.submitted_at;
+          writeCache();
           renderList(); renderForm();
           KZ.toast("Evaluation submitted.");
         }, function (e) {

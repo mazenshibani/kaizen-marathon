@@ -153,7 +153,9 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .score-btn:focus-
 .crit-cmt textarea { min-height: 52px; font-size: 14px; }
 .tbl .cmt-line { font-size: 12px; color: var(--text); background: #F7F9FA; border-left: 3px solid var(--line); padding: 3px 7px; margin-top: 4px; }
 .score-btn { border: 1px solid #BFC8CC; background: #fff; border-radius: 6px; min-height: 40px; font-weight: bold; cursor: pointer; font-size: 15px; padding: 0; }
-.score-btn:hover:not(:disabled) { border-color: var(--teal-dark); background: #F1F5F6; }
+@media (hover: hover) and (pointer: fine) {
+  .score-btn:hover:not(:disabled) { border-color: var(--teal-dark); background: #F1F5F6; }
+}
 .score-btn.on, .score-btn.on:hover:not(:disabled) { background: var(--teal-dark); border-color: var(--teal-dark); color: #fff; }
 .score-btn:disabled { cursor: default; color: #9AA6AB; background: #F7F9FA; }
 .score-btn.on:disabled { background: #5C727B; border-color: #5C727B; color: #fff; }
@@ -251,7 +253,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
   .scores { max-width: none; }
   .scores:not(.labelled) { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .crit-help, .crit-cmt { margin-left: 0; }
-  .score-btn { min-height: 44px; }
+  .score-btn { min-height: 48px; }
+  .scores { gap: 8px; }
   .jbar { grid-template-columns: 1fr 70px; }
   .jbar .progress { grid-column: 1 / -1; order: 3; }
   .kv { grid-template-columns: 1fr; }
@@ -285,4 +288,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
   .sign-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin-top: 42px; }
   .sign-row div { border-top: 1px solid #000; padding-top: 6px; font-size: 12px; }
   .stack > * + * { margin-top: 14px; }
+}
+
+/* press feedback: the control answers the tap immediately */
+.btn, .score-btn, .pitem { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.btn, .score-btn { transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
+.btn:active:not(:disabled), .score-btn:active:not(:disabled) { transform: scale(0.97); }
+.btn.link:active:not(:disabled) { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .btn, .score-btn { transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
+  .btn:active:not(:disabled), .score-btn:active:not(:disabled) { transform: none; }
 }
