@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Admin Portal | PIO Kaizen Marathon</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <img class="logo-pio" src="assets/logo-pio-kaizen-marathon.png" alt="PIO Kaizen Marathon">
+      <span class="brand-text"><b>Admin Portal</b><span id="eventName">PIO Kaizen Marathon</span></span>
+    </div>
+    <div class="topbar-right" id="topRight" hidden>
+      <span class="who"><span class="who-label">Signed in as </span><b id="whoName"></b></span>
+      <button type="button" class="btn small" id="btnPassword">Change password</button>
+      <button type="button" class="btn small" id="btnLogout">Sign out</button>
+    </div>
+    <div class="brand-logos">
+      <img class="logo-kaizen" src="assets/logo-kaizen.png" alt="Kaizen">
+      <img class="logo-alj" src="assets/logo-alj-motors.png" alt="Abdul Latif Jameel Motors">
+    </div>
+  </div>
+</header>
+
+<!-- ============ SIGN IN ============ -->
+<main id="viewLogin" class="login-page" hidden>
+  <form class="card login-card" id="loginForm" autocomplete="on">
+    <h1>Admin sign in</h1>
+    <p class="sub">Results and awards. Restricted to the organizing team.</p>
+    <div id="configNotice" class="notice warn" hidden style="margin-bottom:14px">
+      The portal is not connected to its database yet. Open <b>config.js</b> and add the Supabase URL and key.
+    </div>
+    <label class="field"><span>Username</span>
+      <input type="text" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </label>
+    <label class="field"><span>Password</span>
+      <input type="password" id="loginPass" autocomplete="current-password" required>
+    </label>
+    <div class="login-error" id="loginError" role="alert"></div>
+    <button type="submit" class="btn primary" id="loginBtn">Sign in</button>
+    <div class="login-foot">Judges sign in on the <a href="index.html">judges portal</a>.</div>
+  </form>
+</main>
+
+<!-- ============ FIRST-RUN SETUP (shown once, while no account exists) ============ -->
+<main id="viewSetup" class="login-page" hidden>
+  <form class="card login-card" id="setupForm" autocomplete="off">
+    <h1>First-time setup</h1>
+    <p class="sub">No account exists yet. Create the first admin account; you will add the judges and the other admins from inside the portal.</p>
+    <label class="field"><span>Your full name</span><input type="text" id="setupFull" maxlength="120" required></label>
+    <label class="field"><span>Username (small letters, digits, dot, dash)</span>
+      <input type="text" id="setupUser" maxlength="32" autocapitalize="none" spellcheck="false" required></label>
+    <label class="field"><span>Password (8 characters or more)</span><input type="password" id="setupPass" autocomplete="new-password" required></label>
+    <label class="field"><span>Repeat password</span><input type="password" id="setupPass2" autocomplete="new-password" required></label>
+    <div class="login-error" id="setupError" role="alert"></div>
+    <button type="submit" class="btn primary" id="setupBtn">Create admin account</button>
+    <div class="login-foot">This page disappears as soon as the first account is created.</div>
+  </form>
+</main>
+
+<!-- ============ PORTAL ============ -->
+<main id="viewApp" class="wrap" hidden>
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    <button type="button" class="tab on" data-tab="progress">Progress</button>
+    <button type="button" class="tab" data-tab="results">Results</button>
+    <button type="button" class="tab" data-tab="prizes">Prize sheet</button>
+    <button type="button" class="tab" data-tab="projects">Projects</button>
+    <button type="button" class="tab" data-tab="accounts">Accounts</button>
+    <button type="button" class="tab" data-tab="settings">Settings</button>
+    <button type="button" class="tab" data-tab="audit">Audit log</button>
+    <span class="spacer"></span>
+    <span class="row no-print" style="padding:0 4px;flex-wrap:nowrap">
+      <span class="small muted nowrap" id="updatedAt"></span>
+      <button type="button" class="btn small" id="btnRefresh">Refresh</button>
+    </span>
+  </nav>
+  <div id="panel" class="stack"></div>
+</main>
+
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+(function () {
+  "use strict";
+  var esc = KZ.esc, num = KZ.num, pct = KZ.pct;
+  // Everything this portal touches lives under ROOT (the whole page, unless it is embedded next to the other portal).
+  var ROOT = document.getElementById("portalAdmin") || document;
+  function $(sel, root) { return (root || ROOT).querySelector(sel); }
+  function $all(sel, root) { return Array.prototype.slice.call((root || ROOT).querySelectorAll(sel)); }
+  var store = KZ.session("admin");
+  var S = { session: null, D: null, tab: "progress", reveal: false, audit: null, timer: null };
+  var ORD = ["", "1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th"];
+
+  function token() { return S.session ? S.session.token : null; }
+
+  // ---------------- sign in / out ----------------
+  function showLogin(msg) {
+    S.session = null; S.D = null; S.reveal = false; S.audit = null;
+    clearInterval(S.timer);
+    store.clear(); KZ.closeModal();
+    $("#viewApp").hidden = true; $("#topRight").hidden = true; $("#viewSetup").hidden = true;
+    $("#viewLogin").hidden = false;
+    $("#configNotice").hidden = KZ.isConfigured();
+    $("#loginError").textContent = msg || "";
+    $("#loginPass").value = "";
+    $("#loginUser").focus();
+    // brand-new database: offer the one-time "create the first admin" form instead
+    if (KZ.isConfigured()) {
+      KZ.rpc("kz_setup_status", {}).then(function (r) {
+        if (r && r.needs_setup && !S.session) { $("#viewLogin").hidden = true; $("#viewSetup").hidden = false; $("#setupFull").focus(); }
+      }).catch(function () { /* the sign-in form stays */ });
+    }
+  }
+
+  $("#setupForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var btn = $("#setupBtn"), err = $("#setupError");
+    var user = $("#setupUser").value, pass = $("#setupPass").value;
+    err.textContent = "";
+    if (pass !== $("#setupPass2").value) { err.textContent = "The two passwords do not match."; return; }
+    btn.disabled = true;
+    KZ.rpc("kz_setup_first_admin", { p_username: user, p_full_name: $("#setupFull").value, p_password: pass })
+      .then(function () { return KZ.rpc("kz_login", { p_username: user, p_password: pass, p_portal: "admin" }); })
+      .then(function (r) {
+        $("#setupPass").value = ""; $("#setupPass2").value = "";
+        if (!r.ok) { showLogin(""); return; }
+        S.session = { token: r.token, expires_at: r.expires_at, user: r.user };
+        store.set(S.session);
+        $("#viewSetup").hidden = true;
+        return load(true).then(function () { KZ.toast("Admin account created. Add the judges under Accounts."); });
+      })
+      .catch(function (e2) { if (e2.code === "KZ_SETUP_CLOSED") showLogin(e2.message); else err.textContent = e2.message; })
+      .then(function () { btn.disabled = false; });
+  });
+
+  $("#loginForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var btn = $("#loginBtn"), err = $("#loginError");
+    err.textContent = ""; btn.disabled = true; btn.textContent = "Signing in...";
+    KZ.rpc("kz_login", { p_username: $("#loginUser").value, p_password: $("#loginPass").value, p_portal: "admin" })
+      .then(function (r) {
+        if (!r.ok) {
+          err.textContent = r.error === "LOCKED"
+            ? "Too many wrong attempts. Try again in " + r.minutes + " minute" + (r.minutes === 1 ? "" : "s") + "."
+            : r.error === "WRONG_PORTAL"
+              ? "This is a judge account. Please use the judges portal."
+              : "Wrong username or password.";
+          return;
+        }
+        S.session = { token: r.token, expires_at: r.expires_at, user: r.user };
+        store.set(S.session);
+        return load(true);
+      })
+      .catch(function (e2) { err.textContent = e2.message; })
+      .then(function () { btn.disabled = false; btn.textContent = "Sign in"; });
+  });
+  $("#btnLogout").addEventListener("click", function () {
+    KZ.rpc("kz_logout", { p_token: token() }).catch(function () {}).then(function () { showLogin(""); });
+  });
+  $("#btnPassword").addEventListener("click", function () { KZ.changePasswordDialog(token); });
+
+  function fail(e) {
+    if (e && e.code === "KZ_SESSION") { showLogin(e.message); return; }
+    KZ.toast(e && e.message ? e.message : "Something went wrong.", "error");
+  }
+  // For actions inside a dialog: session loss sends the admin to sign in, anything else shows in the dialog.
+  function act(promise, okMsg) {
+    return promise.then(function () { if (okMsg) KZ.toast(okMsg); return load(false); },
+      function (e) { if (e.code === "KZ_SESSION") { showLogin(e.message); return false; } throw e; });
+  }
+
+  // ---------------- data ----------------
+  function load(first) {
+    return KZ.rpc("kz_admin_load", { p_token: token(), p_reveal: S.reveal }).then(function (d) {
+      S.D = d;
+      $("#viewLogin").hidden = true; $("#viewSetup").hidden = true; $("#viewApp").hidden = false; $("#topRight").hidden = false;
+      $("#whoName").textContent = d.user.full_name;
+      $("#eventName").textContent = d.settings.event_name;
+      document.title = "Admin Portal | " + d.settings.event_name;
+      $("#updatedAt").textContent = "Updated " + KZ.time();
+      render();
+      if (first) {
+        clearInterval(S.timer);
+        S.timer = setInterval(function () {
+          if (S.session && !KZ.$("#modalWrap") && !document.hidden && (S.tab === "progress" || S.tab === "results")) load(false);
+        }, 30000);
+      }
+    }).catch(function (e) {
+      if (first || (e && e.code === "KZ_SESSION")) showLogin(e.message); else fail(e);
+    });
+  }
+
+  function judges() { return S.D.users.filter(function (u) { return u.role === "judge" && u.active; }); }
+  function userName(id) { var u = S.D.users.filter(function (x) { return x.id === id; })[0]; return u ? u.full_name : "(removed)"; }
+  function projectOf(code) { return S.D.projects.filter(function (p) { return p.code === code; })[0]; }
+  function categoryOf(code) { return S.D.categories.filter(function (c) { return c.code === code; })[0]; }
+  // Column label for a judge: first name, or the full name when two judges share a first name.
+  function formByCode(code) { return S.D.forms.filter(function (f) { return f.code === code; })[0]; }
+  function shortName(full) {
+    var first = String(full).split(/\s+/)[0];
+    var clash = judges().filter(function (j) { return String(j.full_name).split(/\s+/)[0] === first; }).length > 1;
+    return clash ? full : first;
+  }
+  function same(a, b) { return Math.abs(a - b) < 1e-9; }
+  function mean(arr) { return arr.reduce(function (a, b) { return a + b; }, 0) / arr.length; }
+
+  // Ranking: average of the judges' weighted scores; ties are broken by the
+  // average Problem-Solving Methodology score. Anything still level is flagged.
+  function compute() {
+    var D = S.D, js = judges(), evMap = {};
+    D.evaluations.forEach(function (e) { evMap[e.judge_id + "|" + e.project_code] = e; });
+    return D.categories.map(function (c) {
+      var prizes = {};
+      D.prizes.filter(function (p) { return p.category === c.code; }).forEach(function (p) { prizes[p.place] = p; });
+      var rows = D.projects.filter(function (p) { return p.category === c.code; }).map(function (p) {
+        var cells = js.map(function (j) { return evMap[j.id + "|" + p.code] || null; });
+        var scored = cells.filter(function (e) { return e && e.status === "submitted" && e.total !== undefined; });
+        return {
+          p: p, cells: cells,
+          submitted: cells.filter(function (e) { return e && e.status === "submitted"; }).length,
+          avg: scored.length ? mean(scored.map(function (e) { return Number(e.total); })) : null,
+          meth: scored.length ? mean(scored.map(function (e) { return Number(e.methodology); })) : null,
+          place: null, prize: null, tie: false, tieBroken: false
+        };
+      });
+      var ranked = rows.filter(function (r) { return r.avg !== null; }).sort(function (a, b) {
+        return (same(a.avg, b.avg) ? 0 : b.avg - a.avg) || (same(a.meth, b.meth) ? 0 : b.meth - a.meth) || a.p.code.localeCompare(b.p.code);
+      });
+      ranked.forEach(function (r, i) {
+        r.place = i + 1; r.prize = prizes[r.place] || null;
+        if (i > 0 && same(ranked[i - 1].avg, r.avg)) {
+          if (same(ranked[i - 1].meth, r.meth)) { r.tie = true; ranked[i - 1].tie = true; }
+          else { r.tieBroken = true; ranked[i - 1].tieBroken = true; }
+        }
+      });
+      var nPrizes = Object.keys(prizes).length;
+      return {
+        c: c, form: formByCode(c.form), crit: KZ.criteriaFor(D.criteria, c.form), prizes: prizes, nPrizes: nPrizes,
+        rows: ranked.concat(rows.filter(function (r) { return r.avg === null; })),
+        // an unresolved tie matters when it touches a prize place
+        openTies: ranked.filter(function (r, i) {
+          var prev = ranked[i - 1];
+          return r.tie && (r.prize || (prev && prev.prize && same(prev.avg, r.avg) && same(prev.meth, r.meth)));
+        })
+      };
+    });
+  }
+
+  // Each winner gets two 500 SAR vouchers; the rest of the award is paid in 1,000 SAR vouchers.
+  function vouchers(amount) {
+    if (amount <= 0) return { v500: 0, v1000: 0 };
+    var v500 = amount >= 1000 ? 2 : Math.floor(amount / 500);
+    var rest = amount - v500 * 500;
+    var v1000 = Math.floor(rest / 1000);
+    v500 += Math.round((rest - v1000 * 1000) / 500);
+    return { v500: v500, v1000: v1000 };
+  }
+
+  function winners(cats) {
+    var out = [];
+    cats.forEach(function (cat) {
+      cat.rows.filter(function (r) { return r.prize; }).forEach(function (r) {
+        var pz = r.prize;
+        out.push({ cat: cat.c, place: r.place, p: r.p, name: r.p.presenter,
+          role: pz.members > 0 ? "Team leader" : (cat.c.code === "I" ? "Individual" : "Leader"), amount: pz.leader_amount });
+        if (pz.members > 0) {
+          var names = S.D.team_members.filter(function (m) { return m.project_code === r.p.code; }).map(function (m) { return m.full_name; });
+          var n = Math.max(pz.members, names.length);
+          for (var i = 0; i < n; i++) {
+            out.push({ cat: cat.c, place: r.place, p: r.p, name: names[i] || "", missing: !names[i], idx: i + 1,
+              role: "Team member", amount: pz.member_amount, extra: i >= pz.members });
+          }
+        }
+      });
+    });
+    out.forEach(function (w) { var v = vouchers(w.amount); w.v500 = v.v500; w.v1000 = v.v1000; });
+    return out;
+  }
+
+  // ---------------- rendering ----------------
+  $("#tabs").addEventListener("click", function (e) {
+    var t = e.target.closest(".tab");
+    if (!t) return;
+    S.tab = t.getAttribute("data-tab");
+    $all(".tab").forEach(function (b) { b.classList.toggle("on", b === t); });
+    render();
+    if (S.tab === "audit") loadAudit();
+  });
+  $("#btnRefresh").addEventListener("click", function () {
+    load(false).then(function () { if (S.tab === "audit") loadAudit(); KZ.toast("Up to date."); });
+  });
+
+  function render() {
+    var fn = { progress: viewProgress, results: viewResults, prizes: viewPrizes, projects: viewProjects,
+      accounts: viewAccounts, settings: viewSettings, audit: viewAudit }[S.tab];
+    $("#panel").innerHTML = fn();
+  }
+
+  function statusLine() {
+    var D = S.D;
+    if (D.complete) return '<div class="notice ok"><b>Judging is complete.</b> All ' + D.expected + " evaluations are submitted. The results below are final unless an evaluation is reopened.</div>";
+    if (!D.expected) return '<div class="notice warn">No active judges or no projects yet. Add judge accounts under <b>Accounts</b>.</div>';
+    return '<div class="notice"><b>' + D.submitted + " of " + D.expected + "</b> evaluations submitted. Results unlock automatically when every judge has submitted every project.</div>";
+  }
+
+  // ----- Progress -----
+  function viewProgress() {
+    var D = S.D, js = judges(), evMap = {};
+    D.evaluations.forEach(function (e) { evMap[e.judge_id + "|" + e.project_code] = e; });
+    var h = statusLine();
+    h += '<div class="kpis">' +
+      kpi("Projects", D.projects.length) + kpi("Active judges", js.length) +
+      kpi("Evaluations submitted", D.submitted + " <small>of " + D.expected + "</small>") +
+      kpi("Judging", D.settings.judging_open ? "Open" : "Closed") + "</div>";
+
+    h += '<div class="card"><div class="panel-head"><h2>Progress by judge</h2></div>';
+    if (!js.length) h += '<div class="empty small">No active judge accounts yet.</div>';
+    js.forEach(function (j) {
+      var mine = D.evaluations.filter(function (e) { return e.judge_id === j.id; });
+      var sub = mine.filter(function (e) { return e.status === "submitted"; }).length;
+      var dr = mine.length - sub;
+      h += '<div class="jbar"><div><b>' + esc(j.full_name) + '</b><div class="small muted">' + esc(j.username) +
+        (j.last_login_at ? " &middot; last sign-in " + esc(KZ.dt(j.last_login_at)) : " &middot; never signed in") + "</div></div>" +
+        '<div class="progress"><i style="width:' + (D.projects.length ? (sub / D.projects.length) * 100 : 0) + '%"></i></div>' +
+        '<div class="right nowrap"><b>' + sub + " / " + D.projects.length + "</b>" + (dr ? '<div class="small muted">' + dr + " in progress</div>" : "") + "</div></div>";
+    });
+    h += "</div>";
+
+    h += '<div class="card"><div class="panel-head"><h2>Evaluation status</h2>' +
+      '<div class="sub">Select a submitted evaluation to view it or reopen it for the judge.' + (D.revealed ? "" : " Scores stay hidden until judging is complete.") + "</div></div>" +
+      '<div class="table-wrap"><table class="tbl"><thead><tr><th>Code</th><th>Project</th>' +
+      js.map(function (j) { return '<th class="center">' + esc(shortName(j.full_name)) + "</th>"; }).join("") + "</tr></thead><tbody>";
+    D.categories.forEach(function (c) {
+      var ps = D.projects.filter(function (p) { return p.category === c.code; });
+      h += '<tr class="group"><td colspan="' + (2 + js.length) + '">' + esc(c.name) + " &middot; " + ps.length + " projects</td></tr>";
+      ps.forEach(function (p) {
+        h += '<tr><td class="code">' + esc(p.code) + "</td><td>" + esc(p.title) + '<div class="sub">' + esc(p.presenter) + "</div></td>";
+        js.forEach(function (j) {
+          var e = evMap[j.id + "|" + p.code];
+          if (!e) h += '<td class="center muted">&ndash;</td>';
+          else if (e.status === "draft") h += '<td class="center"><span class="pill warn">In progress</span></td>';
+          else h += '<td class="center"><button type="button" class="cell-btn" data-act="eval" data-judge="' + j.id + '" data-code="' + esc(p.code) + '">' +
+            '<span class="pill ok">' + (e.total !== undefined ? pct(e.total) : "Submitted") + "</span></button></td>";
+        });
+        h += "</tr>";
+      });
+    });
+    return h + "</tbody></table></div></div>";
+  }
+  // Heading that only appears on paper.
+  function printHead(title, sub) {
+    return '<div class="print-only print-head"><div class="print-logos">' +
+      '<img src="assets/logo-pio-kaizen-marathon.png" alt="PIO Kaizen Marathon"><img src="assets/logo-kaizen.png" alt="Kaizen">' +
+      '<img src="assets/logo-alj-motors.png" alt="Abdul Latif Jameel Motors"></div>' +
+      "<h1>" + esc(S.D.settings.event_name) + " &middot; " + esc(title) + "</h1><div>Printed " + esc(KZ.dt(new Date().toISOString())) +
+      (sub ? " &middot; " + esc(sub) : "") + "</div></div>";
+  }
+  function kpi(lbl, val) { return '<div class="card kpi"><div class="lbl">' + lbl + '</div><div class="val">' + val + "</div></div>"; }
+
+  // ----- locked panel shared by Results and Prize sheet -----
+  function lockedPanel(what) {
+    var D = S.D;
+    return '<div class="card locked-panel"><h2>' + what + " are locked while judging is in progress</h2>" +
+      "<p><b>" + D.submitted + " of " + D.expected + "</b> evaluations are submitted. This page opens automatically once every judge has submitted every project.</p>" +
+      '<button type="button" class="btn" data-act="reveal">Show provisional standings</button>' +
+      '<p class="small" style="margin-top:12px">Viewing provisional standings is recorded in the audit log.</p></div>';
+  }
+
+  // ----- Results -----
+  function viewResults() {
+    var D = S.D;
+    if (!D.revealed) return lockedPanel("Results");
+    var js = judges(), cats = compute();
+    var h = printHead(D.complete ? "Final results" : "Provisional standings", D.submitted + " of " + D.expected + " evaluations submitted");
+    h += D.complete
+      ? '<div class="notice ok no-print"><b>Final results.</b> All ' + D.expected + " evaluations are submitted. Score = average of the judges&rsquo; weighted scores (out of 100).</div>"
+      : '<div class="notice warn"><b>Provisional standings.</b> Only ' + D.submitted + " of " + D.expected + " evaluations are submitted, so averages and places can still change.</div>";
+    h += '<div class="row no-print"><span class="spacer"></span>' +
+      '<button type="button" class="btn" data-act="csv-results">Export results (CSV)</button>' +
+      '<button type="button" class="btn" data-act="csv-scores">Export all scores (CSV)</button>' +
+      '<button type="button" class="btn" data-act="print">Print</button></div>';
+
+    cats.forEach(function (cat) {
+      h += '<div class="card"><div class="panel-head"><h2>' + esc(cat.c.name) + '</h2><span class="pill">' + cat.rows.length + " projects</span>" +
+        '<span class="pill">' + cat.nPrizes + (cat.nPrizes === 1 ? " award" : " awards") + '</span><span class="pill">' + esc(cat.form.name) + ": " + cat.crit.length + " criteria, rated 1&ndash;" + cat.form.scale_max + "</span></div>";
+      if (cat.openTies.length) {
+        h += '<div style="padding:12px 18px 0"><div class="notice danger"><b>Tie on an award place:</b> ' +
+          cat.openTies.map(function (r) { return esc(r.p.code); }).join(", ") +
+          " have the same average and the same methodology score. The committee must decide their order.</div></div>";
+      }
+      h += '<div class="table-wrap"><table class="tbl"><thead><tr><th class="center">Place</th><th>Code</th><th>Project</th>' +
+        js.map(function (j) { return '<th class="right">' + esc(shortName(j.full_name)) + "</th>"; }).join("") +
+        '<th class="right">Average</th><th>Award</th><th class="no-print"></th></tr></thead><tbody>';
+      cat.rows.forEach(function (r) {
+        h += "<tr" + (r.prize ? ' class="winner"' : "") + '><td class="center">' +
+          (r.place ? '<span class="rank' + (r.prize ? " win" : "") + '">' + r.place + "</span>" : '<span class="muted">&ndash;</span>') + "</td>" +
+          '<td class="code">' + esc(r.p.code) + "</td><td>" + esc(r.p.title) + '<div class="sub">' + esc(r.p.presenter) + "</div></td>";
+        r.cells.forEach(function (e) {
+          h += '<td class="right mono">' + (e && e.status === "submitted" && e.total !== undefined ? pct(e.total)
+            : e && e.status === "draft" ? '<span class="muted small">in progress</span>' : '<span class="muted">&ndash;</span>') + "</td>";
+        });
+        h += '<td class="right mono">' + (r.avg !== null ? '<span class="avg">' + pct(r.avg) + "</span>" +
+          (r.submitted < js.length ? '<div class="sub">' + r.submitted + " of " + js.length + " judges</div>" : "") +
+          (r.tie ? '<div class="sub" style="color:var(--danger)">tie</div>' : r.tieBroken ? '<div class="sub">tie-break ' + pct(r.meth) + "</div>" : "")
+          : '<span class="muted">&ndash;</span>') + "</td>" +
+          "<td>" + (r.prize ? "<b>" + ORD[r.place] + " place</b><div class=\"sub\">SAR " + num(r.prize.leader_amount) +
+            (r.prize.members ? " leader &middot; SAR " + num(r.prize.member_amount) + " per member" : "") + "</div>" : "") + "</td>" +
+          '<td class="right no-print">' + (r.avg !== null ? '<button type="button" class="btn small" data-act="detail" data-code="' + esc(r.p.code) + '">Details</button>' : "") + "</td></tr>";
+      });
+      h += "</tbody></table></div></div>";
+    });
+
+    h += '<div class="print-only"><div class="sign-row">' +
+      js.map(function (j) { return "<div>" + esc(j.full_name) + "<br>Judge &middot; signature</div>"; }).join("") + "</div></div>";
+    return h;
+  }
+
+  // ----- Prize sheet -----
+  function viewPrizes() {
+    var D = S.D;
+    if (!D.revealed) return lockedPanel("Awards");
+    var cats = compute(), ws = winners(cats);
+    var tot = ws.reduce(function (a, w) { return { amt: a.amt + w.amount, v500: a.v500 + w.v500, v1000: a.v1000 + w.v1000 }; }, { amt: 0, v500: 0, v1000: 0 });
+    var budget = D.prizes.reduce(function (a, p) { return a + p.leader_amount + p.member_amount * p.members; }, 0);
+    var h = printHead("Prize sheet" + (D.complete ? "" : " (provisional)"), "");
+    if (!D.complete) h += '<div class="notice warn"><b>Provisional.</b> Judging is not complete, so the winners below can still change.</div>';
+    cats.forEach(function (cat) {
+      if (cat.openTies.length) h += '<div class="notice danger"><b>' + esc(cat.c.name) + ":</b> unresolved tie on an award place (" +
+        cat.openTies.map(function (r) { return esc(r.p.code); }).join(", ") + "). Confirm the order with the committee before paying awards.</div>";
+    });
+    if (ws.some(function (w) { return w.extra; })) h += '<div class="notice warn">A winning team has more members entered than the approved number, so the total is above the approved budget of SAR ' + num(budget) + ".</div>";
+
+    h += '<div class="card"><div class="panel-head"><h2>Award distribution</h2><span class="spacer"></span>' +
+      '<button type="button" class="btn no-print" data-act="csv-prizes">Export (CSV)</button><button type="button" class="btn no-print" data-act="print">Print</button>' +
+      '<div class="sub">Each winner receives two 500 SAR vouchers; the remainder of the award is paid in 1,000 SAR vouchers.</div></div>' +
+      '<div class="sum-tiles"><div><div class="lbl">Winners</div><div class="val">' + ws.length + '</div></div>' +
+      '<div><div class="lbl">Total awards</div><div class="val">SAR ' + num(tot.amt) + '</div></div>' +
+      '<div><div class="lbl">500 SAR vouchers</div><div class="val">' + num(tot.v500) + '</div></div>' +
+      '<div><div class="lbl">1,000 SAR vouchers</div><div class="val">' + num(tot.v1000) + "</div></div></div>";
+    if (!ws.length) h += '<div class="empty small">No ranked projects yet.</div>';
+    else {
+      h += '<div class="table-wrap"><table class="tbl"><thead><tr><th>#</th><th>Category</th><th>Place</th><th>Project</th><th>Recipient</th><th>Role</th>' +
+        '<th class="right">Award (SAR)</th><th class="right">500 SAR vouchers</th><th class="right">1,000 SAR vouchers</th></tr></thead><tbody>';
+      ws.forEach(function (w, i) {
+        h += "<tr><td>" + (i + 1) + "</td><td>" + esc(w.cat.name) + "</td><td>" + ORD[w.place] + '</td><td><span class="code">' + esc(w.p.code) + '</span><div class="sub">' + esc(w.p.title) + "</div></td>" +
+          "<td>" + (w.missing ? '<span class="muted">Member ' + w.idx + " (name not entered)</span>" : "<b>" + esc(w.name) + "</b>") + "</td><td class=\"role\">" + w.role + "</td>" +
+          '<td class="right mono">' + num(w.amount) + '</td><td class="right mono">' + w.v500 + '</td><td class="right mono">' + w.v1000 + "</td></tr>";
+      });
+      h += '</tbody><tfoot><tr><td colspan="6">Total</td><td class="right mono">' + num(tot.amt) + '</td><td class="right mono">' + num(tot.v500) +
+        '</td><td class="right mono">' + num(tot.v1000) + "</td></tr></tfoot></table></div>";
+    }
+    h += "</div>";
+
+    // member names for winning teams
+    cats.forEach(function (cat) {
+      cat.rows.filter(function (r) { return r.prize && r.prize.members > 0; }).forEach(function (r) {
+        var names = D.team_members.filter(function (m) { return m.project_code === r.p.code; }).map(function (m) { return m.full_name; });
+        var n = Math.max(r.prize.members, names.length);
+        h += '<div class="card no-print"><div class="panel-head"><h2>Team members &middot; ' + esc(r.p.code) + '</h2><span class="pill">' + ORD[r.place] + " place</span>" +
+          '<div class="sub">' + esc(r.p.title) + " &middot; leader " + esc(r.p.presenter) + " &middot; " + r.prize.members + " members receive SAR " + num(r.prize.member_amount) + " each</div></div>" +
+          '<div class="card-pad"><div class="members-edit" data-members="' + esc(r.p.code) + '">';
+        for (var i = 0; i < n; i++) h += '<input type="text" maxlength="120" placeholder="Member ' + (i + 1) + ' full name" value="' + esc(names[i] || "") + '" aria-label="Member ' + (i + 1) + '">';
+        h += '</div><div class="row" style="margin-top:12px"><button type="button" class="btn primary" data-act="save-members" data-code="' + esc(r.p.code) + '">Save names</button></div></div></div>';
+      });
+    });
+    return h;
+  }
+
+  // ----- Projects -----
+  function viewProjects() {
+    var D = S.D, used = {};
+    D.evaluations.forEach(function (e) { used[e.project_code] = true; });
+    var h = '<div class="card"><div class="panel-head"><h2>Projects</h2><span class="pill">' + D.projects.length + '</span><span class="spacer"></span>' +
+      '<button type="button" class="btn primary" data-act="project-new">Add project</button>' +
+      '<div class="sub">A project that already has evaluations cannot be deleted or moved to another category.</div></div>' +
+      '<div class="table-wrap"><table class="tbl"><thead><tr><th>Code</th><th>Title</th><th>Presenter / leader</th><th></th></tr></thead><tbody>';
+    D.categories.forEach(function (c) {
+      var ps = D.projects.filter(function (p) { return p.category === c.code; });
+      h += '<tr class="group"><td colspan="4">' + esc(c.name) + " &middot; " + ps.length + " projects</td></tr>";
+      ps.forEach(function (p) {
+        h += '<tr><td class="code">' + esc(p.code) + "</td><td>" + esc(p.title) + "</td><td>" + esc(p.presenter) + '</td><td class="right nowrap">' +
+          '<button type="button" class="btn small" data-act="project-edit" data-code="' + esc(p.code) + '">Edit</button> ' +
+          (used[p.code] ? "" : '<button type="button" class="btn small" data-act="project-del" data-code="' + esc(p.code) + '">Delete</button>') + "</td></tr>";
+      });
+    });
+    return h + "</tbody></table></div></div>";
+  }
+
+  // ----- Accounts -----
+  function viewAccounts() {
+    var D = S.D;
+    var h = '<div class="card"><div class="panel-head"><h2>Accounts</h2><span class="spacer"></span>' +
+      '<button type="button" class="btn primary" data-act="user-new">Add account</button>' +
+      '<div class="sub">Judges sign in on the judges portal, admins on this portal. Give each person their username and password privately.</div></div>' +
+      '<div class="table-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead><tbody>';
+    D.users.forEach(function (u) {
+      h += "<tr><td><b>" + esc(u.full_name) + "</b>" + (u.id === D.user.id ? ' <span class="pill">you</span>' : "") + "</td><td>" + esc(u.username) + "</td>" +
+        "<td>" + (u.role === "admin" ? "Admin" : "Judge") + "</td><td>" +
+        (!u.active ? '<span class="pill danger">Disabled</span>' : u.locked ? '<span class="pill warn">Locked (wrong password)</span>' : '<span class="pill ok">Active</span>') + "</td>" +
+        '<td class="small muted">' + (u.last_login_at ? esc(KZ.dt(u.last_login_at)) : "Never") + '</td><td class="right">' +
+        '<button type="button" class="btn small" data-act="user-edit" data-id="' + u.id + '">Edit</button></td></tr>';
+    });
+    return h + "</tbody></table></div></div>";
+  }
+
+  // ----- Settings -----
+  function viewSettings() {
+    var D = S.D, catUsed = {};
+    D.evaluations.forEach(function (e) { var p = projectOf(e.project_code); if (p) catUsed[p.category] = true; });
+    var h = '<div class="card"><div class="panel-head"><h2>Judging window</h2></div><div class="card-pad"><div class="row">' +
+      "<div><b>Judging is " + (D.settings.judging_open ? "open" : "closed") + "</b><div class=\"small muted\">" +
+      (D.settings.judging_open ? "Judges can save and submit evaluations." : "Judges can read their evaluations but cannot change anything.") + "</div></div><span class=\"spacer\"></span>" +
+      '<button type="button" class="btn" data-act="toggle-judging">' + (D.settings.judging_open ? "Close judging" : "Open judging") + "</button></div></div></div>";
+
+    h += '<div class="card"><div class="panel-head"><h2>Evaluation form per category</h2>' +
+      '<div class="sub">From the 2026 KM Evaluation Form workbook. ' + D.forms.map(function (f) {
+        return "<b>" + esc(f.name) + "</b>: " + KZ.criteriaFor(D.criteria, f.code).length + " criteria rated 1&ndash;" + f.scale_max;
+      }).join(" &middot; ") + ". A category&rsquo;s form can only be changed before any judge starts scoring it.</div></div>" +
+      '<div class="table-wrap"><table class="tbl"><thead><tr><th>Category</th><th>Projects</th><th>Form</th><th></th></tr></thead><tbody>';
+    D.categories.forEach(function (c) {
+      var lock = !!catUsed[c.code];
+      h += "<tr><td><b>" + esc(c.name) + "</b></td><td>" + D.projects.filter(function (p) { return p.category === c.code; }).length + "</td><td>" +
+        '<select data-form="' + esc(c.code) + '" style="max-width:300px"' + (lock ? " disabled" : "") + ">" +
+        D.forms.map(function (f) { return '<option value="' + esc(f.code) + '"' + (c.form === f.code ? " selected" : "") + ">" + esc(f.name) + " (rated 1&ndash;" + f.scale_max + ")</option>"; }).join("") +
+        '</select></td><td class="right">' +
+        (lock ? '<span class="small muted">Locked: scoring has started</span>' : '<button type="button" class="btn small" data-act="save-form" data-cat="' + esc(c.code) + '">Save</button>') + "</td></tr>";
+    });
+    h += "</tbody></table></div></div>";
+
+    h += '<div class="card"><div class="panel-head"><h2>Awards</h2><div class="sub">Approved amounts per place (SAR).</div></div>' +
+      '<div class="table-wrap"><table class="tbl"><thead><tr><th>Category</th><th>Place</th><th class="right">Leader</th><th class="right">Members</th><th class="right">Per member</th><th class="right">Total</th></tr></thead><tbody>';
+    var grand = 0;
+    D.categories.forEach(function (c) {
+      D.prizes.filter(function (p) { return p.category === c.code; }).forEach(function (p) {
+        var t = p.leader_amount + p.member_amount * p.members; grand += t;
+        h += "<tr><td>" + esc(c.name) + "</td><td>" + ORD[p.place] + '</td><td class="right mono">' + num(p.leader_amount) + '</td><td class="right mono">' + p.members +
+          '</td><td class="right mono">' + num(p.member_amount) + '</td><td class="right mono">' + num(t) + "</td></tr>";
+      });
+    });
+    return h + '</tbody><tfoot><tr><td colspan="5">Total budget</td><td class="right mono">' + num(grand) + "</td></tr></tfoot></table></div></div>";
+  }
+
+  // ----- Audit log -----
+  var ACTIONS = {
+    first_admin_created: "Created the first admin account (setup page)", login: "Signed in", login_locked: "Account locked after wrong passwords", password_changed: "Changed own password",
+    password_reset_from_sql_editor: "Password reset from the database",
+    evaluation_submitted: "Submitted evaluation", evaluation_reopened: "Reopened evaluation",
+    provisional_results_viewed: "Viewed provisional standings",
+    judging_opened: "Opened judging", judging_closed: "Closed judging", category_form_changed: "Changed evaluation form",
+    user_created: "Created account", user_updated: "Updated account",
+    project_created: "Added project", project_updated: "Edited project", project_deleted: "Deleted project",
+    team_members_updated: "Updated team members"
+  };
+  function auditDetails(a) {
+    var d = a.details || {};
+    switch (a.action) {
+      case "evaluation_submitted": return "Score " + pct(d.total);
+      case "evaluation_reopened": return "Reason: " + d.reason + " (previous score " + pct(d.previous_total) + ")";
+      case "provisional_results_viewed": return d.submitted + " of " + d.expected + " submitted at the time";
+      case "category_form_changed": return (categoryOf(d.category) || { name: d.category }).name + ": " + d.from + " to " + d.to;
+      case "user_created": return d.username + " (" + d.role + ")";
+      case "user_updated": return d.username + " (" + d.role + (d.active ? "" : ", disabled") + ")" + (d.password_changed ? ", password reset" : "");
+      case "password_reset_from_sql_editor": case "first_admin_created": return d.username;
+      case "project_created": case "project_updated": case "project_deleted": return d.title || "";
+      case "team_members_updated": return (d.members || []).filter(function (m) { return String(m).trim(); }).join(", ");
+      default: return "";
+    }
+  }
+  function loadAudit() {
+    return KZ.rpc("kz_admin_audit", { p_token: token(), p_limit: 1000 }).then(function (rows) {
+      S.audit = rows; if (S.tab === "audit") render();
+    }).catch(fail);
+  }
+  function viewAudit() {
+    var h = '<div class="card"><div class="panel-head"><h2>Audit log</h2><span class="spacer"></span>' +
+      '<button type="button" class="btn" data-act="csv-audit">Export (CSV)</button>' +
+      '<div class="sub">Every sign-in, submission, reopening and change is recorded here and cannot be edited from the portal.</div></div>';
+    if (!S.audit) return h + '<div class="empty small">Loading...</div></div>';
+    h += '<div class="table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Judge</th><th>Details</th></tr></thead><tbody>';
+    S.audit.forEach(function (a) {
+      h += '<tr><td class="nowrap small">' + esc(KZ.dt(a.at)) + "</td><td>" + esc(a.actor_name || "Database owner") + "</td><td>" + esc(ACTIONS[a.action] || a.action) + "</td>" +
+        '<td class="code">' + esc(a.project_code || "") + "</td><td>" + (a.judge_id ? esc(userName(a.judge_id)) : "") + '</td><td class="details-json">' + esc(auditDetails(a)) + "</td></tr>";
+    });
+    return h + "</tbody></table></div></div>";
+  }
+
+  // ---------------- actions ----------------
+  $("#panel").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-act]");
+    if (!b) return;
+    var a = b.getAttribute("data-act"), code = b.getAttribute("data-code");
+    if (a === "eval") return dlgEvaluation(b.getAttribute("data-judge"), code);
+    if (a === "detail") return dlgProject(code);
+    if (a === "reveal") return dlgReveal();
+    if (a === "print") return window.print();
+    if (a === "csv-results") return csvResults();
+    if (a === "csv-scores") return csvScores();
+    if (a === "csv-prizes") return csvPrizes();
+    if (a === "csv-audit") return csvAudit();
+    if (a === "save-members") return saveMembers(code, b);
+    if (a === "project-new") return dlgProjectEdit(null);
+    if (a === "project-edit") return dlgProjectEdit(projectOf(code));
+    if (a === "project-del") return dlgProjectDelete(projectOf(code));
+    if (a === "user-new") return dlgUser(null);
+    if (a === "user-edit") return dlgUser(S.D.users.filter(function (u) { return u.id === b.getAttribute("data-id"); })[0]);
+    if (a === "toggle-judging") return dlgJudging();
+    if (a === "save-form") return saveForm(b.getAttribute("data-cat"));
+  });
+
+  function dlgReveal() {
+    KZ.modal({
+      title: "Show provisional standings?",
+      okText: "Show provisional standings",
+      body: "<p>Judging is not complete: <b>" + S.D.submitted + " of " + S.D.expected + "</b> evaluations are submitted.</p>" +
+        "<p>Standings shown now can change. Your name and the time will be recorded in the audit log.</p>",
+      onOk: function () { S.reveal = true; return act(Promise.resolve()); }
+    });
+  }
+
+  function critTable(crit, evals, heads, scaleMax) {
+    var h = '<div class="table-wrap"><table class="tbl"><thead><tr><th>Criterion</th><th class="right">Weight</th>' +
+      heads.map(function (x) { return '<th class="right">' + esc(x) + (scaleMax ? " (1&ndash;" + scaleMax + ")" : "") + "</th>"; }).join("") + "</tr></thead><tbody>";
+    crit.forEach(function (c) {
+      var notes = evals.map(function (e, i) {
+        var t = e && e.comments && e.comments[c.id];
+        return t ? '<div class="cmt-line">' + (evals.length > 1 ? "<b>" + esc(heads[i]) + ":</b> " : "") + esc(t) + "</div>" : "";
+      }).join("");
+      h += "<tr><td>" + esc(c.name) + '<div class="sub">' + esc(c.section) + "</div>" + notes + '</td><td class="right mono">' + Number(c.weight) + "%</td>" +
+        evals.map(function (e) { return '<td class="right mono">' + (e && e.scores && e.scores[c.id] ? e.scores[c.id] : "&ndash;") + "</td>"; }).join("") + "</tr>";
+    });
+    h += '</tbody><tfoot><tr><td colspan="2">Weighted score (out of 100)</td>' +
+      evals.map(function (e) { return '<td class="right mono">' + (e && e.total !== undefined ? pct(e.total) : "&ndash;") + "</td>"; }).join("") + "</tr></tfoot></table></div>";
+    return h;
+  }
+
+  function dlgEvaluation(judgeId, code) {
+    var D = S.D, p = projectOf(code);
+    var e = D.evaluations.filter(function (x) { return x.judge_id === judgeId && x.project_code === code; })[0];
+    if (!e || !p) return;
+    var form = formByCode(categoryOf(p.category).form), crit = KZ.criteriaFor(D.criteria, form.code);
+    var body = '<dl class="kv"><dt>Project</dt><dd><b>' + esc(p.code) + "</b> &middot; " + esc(p.title) + "</dd><dt>Judge</dt><dd>" + esc(userName(judgeId)) +
+      "</dd><dt>Submitted</dt><dd>" + esc(KZ.dt(e.submitted_at)) + "</dd></dl>";
+    body += e.total !== undefined
+      ? '<div style="margin-top:14px">' + critTable(crit, [e], ["Rating"], form.scale_max) + "</div>" + (e.notes ? '<p style="margin-top:12px"><b>Notes:</b> ' + esc(e.notes) + "</p>" : "")
+      : '<p class="muted" style="margin-top:14px">Scores are hidden until judging is complete.</p>';
+    body += '<label class="field" style="margin:16px 0 0"><span>To reopen this evaluation for the judge, give a reason</span>' +
+      '<input type="text" id="reopenReason" maxlength="300" placeholder="e.g. judge asked to correct criterion 4"></label>';
+    KZ.modal({
+      title: "Submitted evaluation", wide: true, okText: "Reopen for editing", cancelText: "Close", danger: true, body: body,
+      onOk: function (root) {
+        var reason = $("#reopenReason", root).value.trim();
+        if (reason.length < 3) throw new Error("Enter a reason to reopen.");
+        return act(KZ.rpc("kz_admin_reopen", { p_token: token(), p_judge: judgeId, p_project: code, p_reason: reason }),
+          "Evaluation reopened. The judge can edit and resubmit it.");
+      }
+    });
+  }
+
+  function dlgProject(code) {
+    var D = S.D, p = projectOf(code), js = judges();
+    var cat = compute().filter(function (c) { return c.c.code === p.category; })[0];
+    var r = cat.rows.filter(function (x) { return x.p.code === code; })[0];
+    var evs = r.cells.map(function (e) { return e && e.status === "submitted" ? e : null; });
+    var body = '<dl class="kv"><dt>Project</dt><dd><b>' + esc(p.code) + "</b> &middot; " + esc(p.title) + "</dd><dt>Presenter</dt><dd>" + esc(p.presenter) +
+      "</dd><dt>Category</dt><dd>" + esc(cat.c.name) + "</dd><dt>Average</dt><dd><b>" + pct(r.avg) + "</b> out of 100 &middot; place " + r.place + " of " + cat.rows.length + "</dd></dl>" +
+      '<div style="margin-top:14px">' + critTable(cat.crit, evs, js.map(function (j) { return shortName(j.full_name); }), cat.form.scale_max) + "</div>";
+    js.forEach(function (j, i) {
+      if (evs[i] && evs[i].notes) body += '<p style="margin-top:10px"><b>' + esc(j.full_name) + ":</b> " + esc(evs[i].notes) + "</p>";
+    });
+    KZ.modal({ title: "Score breakdown", wide: true, cancelText: "Close", body: body });
+  }
+
+  function saveMembers(code, btn) {
+    var names = $all('[data-members="' + code + '"] input').map(function (i) { return i.value.trim(); });
+    while (names.length && !names[names.length - 1]) names.pop();
+    btn.disabled = true;
+    KZ.rpc("kz_admin_set_members", { p_token: token(), p_project: code, p_members: names })
+      .then(function () { KZ.toast("Team members saved."); return load(false); })
+      .catch(function (e) { btn.disabled = false; fail(e); });
+  }
+
+  function dlgProjectEdit(p) {
+    var D = S.D, isNew = !p;
+    KZ.modal({
+      title: isNew ? "Add project" : "Edit project " + p.code, okText: isNew ? "Add project" : "Save changes",
+      body: '<label class="field"><span>Project code</span><input type="text" id="pjCode" maxlength="20" placeholder="e.g. B-210-26" value="' + esc(isNew ? "" : p.code) + '"' + (isNew ? "" : " disabled") + "></label>" +
+        '<label class="field"><span>Category</span><select id="pjCat">' + D.categories.map(function (c) {
+          return '<option value="' + esc(c.code) + '"' + (!isNew && p.category === c.code ? " selected" : "") + ">" + esc(c.name) + "</option>"; }).join("") + "</select></label>" +
+        '<label class="field"><span>Project title</span><input type="text" id="pjTitle" maxlength="200" value="' + esc(isNew ? "" : p.title) + '"></label>' +
+        '<label class="field"><span>Presenter / team leader</span><input type="text" id="pjPres" maxlength="120" value="' + esc(isNew ? "" : p.presenter) + '"></label>',
+      onOk: function (root) {
+        return act(KZ.rpc("kz_admin_save_project", { p_token: token(), p_code: $("#pjCode", root).value, p_category: $("#pjCat", root).value,
+          p_title: $("#pjTitle", root).value, p_presenter: $("#pjPres", root).value, p_is_new: isNew }), isNew ? "Project added." : "Project saved.");
+      }
+    });
+  }
+  function dlgProjectDelete(p) {
+    KZ.modal({
+      title: "Delete project?", okText: "Delete project", danger: true,
+      body: "<p><b>" + esc(p.code) + "</b> &middot; " + esc(p.title) + "</p><p class=\"muted\">This removes the project from every judge&rsquo;s list.</p>",
+      onOk: function () { return act(KZ.rpc("kz_admin_delete_project", { p_token: token(), p_code: p.code }), "Project deleted."); }
+    });
+  }
+
+  function dlgUser(u) {
+    var isNew = !u;
+    KZ.modal({
+      title: isNew ? "Add account" : "Edit account", okText: isNew ? "Create account" : "Save changes",
+      body: '<label class="field"><span>Full name</span><input type="text" id="usFull" maxlength="120" value="' + esc(isNew ? "" : u.full_name) + '"></label>' +
+        '<label class="field"><span>Username (small letters, digits, dot, dash; 3 to 32)</span><input type="text" id="usName" maxlength="32" autocapitalize="none" spellcheck="false" value="' + esc(isNew ? "" : u.username) + '"></label>' +
+        '<label class="field"><span>Role</span><select id="usRole"><option value="judge"' + (!isNew && u.role === "judge" ? " selected" : "") + ">Judge</option>" +
+        '<option value="admin"' + (!isNew && u.role === "admin" ? " selected" : "") + ">Admin</option></select></label>" +
+        '<label class="field"><span>' + (isNew ? "Password (8 characters or more)" : "New password (leave empty to keep the current one)") + '</span><input type="password" id="usPass" autocomplete="new-password"></label>' +
+        '<label class="row" style="gap:8px"><input type="checkbox" id="usActive"' + (isNew || u.active ? " checked" : "") + '> <span>Account is active' +
+        (isNew ? "" : " (a disabled judge&rsquo;s scores are left out of the results)") + "</span></label>",
+      onOk: function (root) {
+        return act(KZ.rpc("kz_admin_save_user", { p_token: token(), p_id: isNew ? null : u.id, p_username: $("#usName", root).value,
+          p_full_name: $("#usFull", root).value, p_role: $("#usRole", root).value, p_password: $("#usPass", root).value || null,
+          p_active: $("#usActive", root).checked }), isNew ? "Account created." : "Account saved.");
+      }
+    });
+  }
+
+  function dlgJudging() {
+    var open = S.D.settings.judging_open;
+    KZ.modal({
+      title: open ? "Close judging?" : "Open judging?", okText: open ? "Close judging" : "Open judging",
+      body: open ? "<p>Judges will no longer be able to save or submit evaluations. Drafts that are not submitted stay as drafts.</p>"
+        : "<p>Judges will be able to save and submit evaluations again.</p>",
+      onOk: function () { return act(KZ.rpc("kz_admin_set_judging", { p_token: token(), p_open: !open }), open ? "Judging closed." : "Judging opened."); }
+    });
+  }
+  function saveForm(cat) {
+    var val = $('[data-form="' + cat + '"]').value;
+    KZ.rpc("kz_admin_set_form", { p_token: token(), p_category: cat, p_form: val })
+      .then(function () { KZ.toast("Evaluation form saved."); return load(false); }).catch(function (e) { fail(e); load(false); });
+  }
+
+  // ---------------- exports ----------------
+  function stamp() { return new Date().toISOString().slice(0, 10); }
+  function csvResults() {
+    var js = judges(), rows = [["Category", "Place", "Code", "Project", "Presenter"].concat(js.map(function (j) { return j.full_name; }))
+      .concat(["Judges submitted", "Average (out of 100)", "Tie-break: methodology average", "Award place", "Leader award (SAR)", "Award per member (SAR)"])];
+    compute().forEach(function (cat) {
+      cat.rows.forEach(function (r) {
+        rows.push([cat.c.name, r.place || "", r.p.code, r.p.title, r.p.presenter]
+          .concat(r.cells.map(function (e) { return e && e.status === "submitted" && e.total !== undefined ? Number(e.total).toFixed(2) : ""; }))
+          .concat([r.submitted + " of " + js.length, r.avg !== null ? r.avg.toFixed(2) : "", r.meth !== null ? r.meth.toFixed(2) : "",
+            r.prize ? ORD[r.place] : "", r.prize ? r.prize.leader_amount : "", r.prize && r.prize.members ? r.prize.member_amount : ""]));
+      });
+    });
+    KZ.downloadCsv("Kaizen_Marathon_Results_" + stamp() + ".csv", rows);
+  }
+  function csvScores() {
+    var D = S.D, rows = [["Category", "Code", "Project", "Presenter", "Judge", "Status", "Submitted at", "Weighted score (out of 100)"]
+      .concat(D.criteria.map(function (c) { var f = formByCode(c.form); return f.name + " - " + c.name + " (" + Number(c.weight) + "%, 1-" + f.scale_max + ")"; }))
+      .concat(["Criterion comments", "Notes"])];
+    D.projects.forEach(function (p) {
+      judges().forEach(function (j) {
+        var e = D.evaluations.filter(function (x) { return x.judge_id === j.id && x.project_code === p.code; })[0];
+        var sc = e && e.scores ? e.scores : {};
+        rows.push([categoryOf(p.category).name, p.code, p.title, p.presenter, j.full_name, e ? e.status : "not started",
+          e && e.submitted_at ? KZ.dt(e.submitted_at) : "", e && e.total !== undefined ? Number(e.total).toFixed(2) : ""]
+          .concat(D.criteria.map(function (c) { return sc[c.id] || ""; }))
+          .concat([e && e.comments ? D.criteria.filter(function (c) { return e.comments[c.id]; }).map(function (c) { return c.name + ": " + e.comments[c.id]; }).join(" | ") : "",
+            e && e.notes ? e.notes : ""]));
+      });
+    });
+    KZ.downloadCsv("Kaizen_Marathon_All_Scores_" + stamp() + ".csv", rows);
+  }
+  function csvPrizes() {
+    var ws = winners(compute()), t = { a: 0, x: 0, y: 0 };
+    var rows = [["#", "Category", "Place", "Project code", "Project", "Recipient", "Role", "Award (SAR)", "500 SAR vouchers", "1,000 SAR vouchers"]];
+    ws.forEach(function (w, i) {
+      t.a += w.amount; t.x += w.v500; t.y += w.v1000;
+      rows.push([i + 1, w.cat.name, ORD[w.place], w.p.code, w.p.title, w.missing ? "Member " + w.idx + " (name not entered)" : w.name, w.role, w.amount, w.v500, w.v1000]);
+    });
+    rows.push(["", "", "", "", "", "Total", "", t.a, t.x, t.y]);
+    KZ.downloadCsv("Kaizen_Marathon_Prize_Sheet_" + stamp() + ".csv", rows);
+  }
+  function csvAudit() {
+    var rows = [["When", "Who", "Action", "Project", "Judge", "Details"]];
+    (S.audit || []).forEach(function (a) {
+      rows.push([KZ.dt(a.at), a.actor_name || "Database owner", ACTIONS[a.action] || a.action, a.project_code || "", a.judge_id ? userName(a.judge_id) : "", auditDetails(a)]);
+    });
+    KZ.downloadCsv("Kaizen_Marathon_Audit_Log_" + stamp() + ".csv", rows);
+  }
+
+  // ---------------- start ----------------
+  S.session = store.get();
+  if (S.session) load(true); else showLogin("");
+})();
+</script>
+</body>
+</html>

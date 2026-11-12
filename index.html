@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Judges Portal | PIO Kaizen Marathon</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <img class="logo-pio" src="assets/logo-pio-kaizen-marathon.png" alt="PIO Kaizen Marathon">
+      <span class="brand-text"><b>Judges Portal</b><span id="eventName">PIO Kaizen Marathon</span></span>
+    </div>
+    <div class="topbar-right" id="topRight" hidden>
+      <span class="who"><span class="who-label">Signed in as </span><b id="whoName"></b></span>
+      <button type="button" class="btn small" id="btnPassword">Change password</button>
+      <button type="button" class="btn small" id="btnLogout">Sign out</button>
+    </div>
+    <div class="brand-logos">
+      <img class="logo-kaizen" src="assets/logo-kaizen.png" alt="Kaizen">
+      <img class="logo-alj" src="assets/logo-alj-motors.png" alt="Abdul Latif Jameel Motors">
+    </div>
+  </div>
+</header>
+
+<!-- ============ SIGN IN ============ -->
+<main id="viewLogin" class="login-page" hidden>
+  <form class="card login-card" id="loginForm" autocomplete="on">
+    <h1>Judges sign in</h1>
+    <p class="sub">Enter the username and password given to you by the organizing team.</p>
+    <div id="configNotice" class="notice warn" hidden style="margin-bottom:14px">
+      The portal is not connected to its database yet. Open <b>config.js</b> and add the Supabase URL and key.
+    </div>
+    <label class="field"><span>Username</span>
+      <input type="text" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </label>
+    <label class="field"><span>Password</span>
+      <input type="password" id="loginPass" autocomplete="current-password" required>
+    </label>
+    <div class="login-error" id="loginError" role="alert"></div>
+    <button type="submit" class="btn primary" id="loginBtn">Sign in</button>
+    <div class="login-foot">Production Installation Operations &middot; Kaizen Marathon evaluation</div>
+  </form>
+</main>
+
+<!-- ============ PORTAL ============ -->
+<main id="viewApp" class="wrap" hidden>
+  <div id="closedNotice" class="notice warn" hidden style="margin-bottom:16px">
+    Judging is currently closed by the organizing team. You can read your evaluations but not change them.
+  </div>
+  <div class="judge-grid" id="grid">
+    <aside class="card side">
+      <div class="side-head">
+        <div class="row">
+          <h2>Projects to evaluate</h2><span class="spacer"></span>
+          <button type="button" class="btn link small" id="btnRefresh">Refresh</button>
+        </div>
+        <div class="progress" aria-hidden="true"><i id="progBar" style="width:0"></i></div>
+        <div class="small muted" id="progText"></div>
+        <input type="search" id="search" placeholder="Search code, title or presenter" style="margin-top:10px" aria-label="Search projects">
+      </div>
+      <div class="plist" id="plist"></div>
+    </aside>
+
+    <section class="main">
+      <button type="button" class="btn back-btn" id="btnBack">&larr; All projects</button>
+      <div class="card" id="formCard"></div>
+    </section>
+  </div>
+</main>
+
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+(function () {
+  "use strict";
+  var esc = KZ.esc;
+  // Everything this portal touches lives under ROOT (the whole page, unless it is embedded next to the other portal).
+  var ROOT = document.getElementById("portalJudge") || document;
+  function $(sel, root) { return (root || ROOT).querySelector(sel); }
+  function $all(sel, root) { return Array.prototype.slice.call((root || ROOT).querySelectorAll(sel)); }
+  var store = KZ.session("judge");
+  var S = { session: null, data: null, evals: {}, current: null, lastLoad: 0 };
+  var chain = Promise.resolve();      // saves run one after another, never in parallel
+  var saveTimer = null;
+
+  function token() { return S.session ? S.session.token : null; }
+
+  // ---------------- sign in / out ----------------
+  function showLogin(msg) {
+    S.session = null; S.data = null; S.evals = {}; S.current = null;
+    store.clear();
+    $("#viewApp").hidden = true; $("#topRight").hidden = true;
+    $("#viewLogin").hidden = false;
+    $("#configNotice").hidden = KZ.isConfigured();
+    $("#loginError").textContent = msg || "";
+    $("#loginPass").value = "";
+    $("#loginUser").focus();
+  }
+
+  $("#loginForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var btn = $("#loginBtn"), err = $("#loginError");
+    err.textContent = ""; btn.disabled = true; btn.textContent = "Signing in...";
+    KZ.rpc("kz_login", { p_username: $("#loginUser").value, p_password: $("#loginPass").value, p_portal: "judge" })
+      .then(function (r) {
+        if (!r.ok) {
+          err.textContent = r.error === "LOCKED"
+            ? "Too many wrong attempts. Try again in " + r.minutes + " minute" + (r.minutes === 1 ? "" : "s") + "."
+            : r.error === "WRONG_PORTAL"
+              ? "This is an admin account. Please use the admin portal."
+              : "Wrong username or password.";
+          return;
+        }
+        S.session = { token: r.token, expires_at: r.expires_at, user: r.user };
+        store.set(S.session);
+        return load(true);
+      })
+      .catch(function (e2) { err.textContent = e2.message; })
+      .then(function () { btn.disabled = false; btn.textContent = "Sign in"; });
+  });
+
+  $("#btnLogout").addEventListener("click", function () {
+    var t = token();
+    chain.then(function () { return KZ.rpc("kz_logout", { p_token: t }).catch(function () {}); })
+      .then(function () { showLogin(""); });
+  });
+  $("#btnPassword").addEventListener("click", function () { KZ.changePasswordDialog(token); });
+
+  function fail(e) {
+    if (e && e.code === "KZ_SESSION") { showLogin(e.message); return; }
+    KZ.toast(e && e.message ? e.message : "Something went wrong.", "error");
+    if (e && (e.code === "KZ_LOCKED" || e.code === "KZ_JUDGING_CLOSED" || e.code === "KZ_NO_PROJECT")) load(false);
+  }
+
+  // ---------------- data ----------------
+  function load(first) {
+    return KZ.rpc("kz_judge_load", { p_token: token() }).then(function (d) {
+      S.data = d; S.lastLoad = Date.now();
+      var fresh = {};
+      d.evaluations.forEach(function (ev) {
+        fresh[ev.project_code] = { scores: ev.scores || {}, comments: ev.comments || {}, notes: ev.notes || "", status: ev.status,
+          total: Number(ev.total), updated_at: ev.updated_at, submitted_at: ev.submitted_at, dirty: false };
+      });
+      // keep any local edits that have not reached the server yet
+      Object.keys(S.evals).forEach(function (code) {
+        var loc = S.evals[code];
+        if (loc.dirty && (!fresh[code] || fresh[code].status !== "submitted")) fresh[code] = loc;
+      });
+      S.evals = fresh;
+      if (S.current && !project(S.current)) S.current = null;
+      $("#viewLogin").hidden = true; $("#viewApp").hidden = false; $("#topRight").hidden = false;
+      $("#whoName").textContent = d.user.full_name;
+      $("#eventName").textContent = d.settings.event_name;
+      document.title = "Judges Portal | " + d.settings.event_name;
+      $("#closedNotice").hidden = d.settings.judging_open;
+      renderList();
+      renderForm();
+      if (first) window.scrollTo(0, 0);
+    }).catch(function (e) {
+      if (first || (e && e.code === "KZ_SESSION")) showLogin(e.message); else fail(e);
+    });
+  }
+
+  function project(code) { return S.data.projects.filter(function (p) { return p.code === code; })[0]; }
+  function category(code) { return S.data.categories.filter(function (c) { return c.code === code; })[0]; }
+  function formOf(p) { var f = category(p.category).form; return S.data.forms.filter(function (x) { return x.code === f; })[0]; }
+  function criteriaOf(p) { return KZ.criteriaFor(S.data.criteria, category(p.category).form); }
+  // A comment is asked for when the rating is in the bottom two bands (1-2 on the 1-4 form, 1-4 on the 1-10 form).
+  function lowRating(form, v) { return v && v <= (form.scale_max <= 4 ? 2 : 4); }
+  function evalOf(code) {
+    if (!S.evals[code]) S.evals[code] = { scores: {}, comments: {}, notes: "", status: "new", total: 0, dirty: false };
+    return S.evals[code];
+  }
+  function statusOf(code) { var ev = S.evals[code]; return ev ? ev.status : "new"; }
+  function readOnly(code) { return statusOf(code) === "submitted" || !S.data.settings.judging_open; }
+
+  // ---------------- project list ----------------
+  function renderList() {
+    var q = $("#search").value.trim().toLowerCase();
+    var all = S.data.projects, done = 0, drafts = 0;
+    all.forEach(function (p) { var s = statusOf(p.code); if (s === "submitted") done++; else if (s === "draft") drafts++; });
+    $("#progBar").style.width = (all.length ? (done / all.length) * 100 : 0) + "%";
+    $("#progText").innerHTML = done === all.length && all.length
+      ? "<b>All " + all.length + " evaluations submitted.</b> Thank you."
+      : "<b>" + done + " of " + all.length + "</b> submitted" + (drafts ? " &middot; " + drafts + " in progress" : "");
+
+    var html = "";
+    S.data.categories.forEach(function (c) {
+      var items = all.filter(function (p) {
+        return p.category === c.code && (!q || (p.code + " " + p.title + " " + p.presenter).toLowerCase().indexOf(q) !== -1);
+      });
+      if (!items.length) return;
+      var catDone = items.filter(function (p) { return statusOf(p.code) === "submitted"; }).length;
+      html += '<div class="pgroup"><span>' + esc(c.name) + '</span><span>' + catDone + " / " + items.length + "</span></div>";
+      items.forEach(function (p) {
+        var s = statusOf(p.code);
+        var label = s === "submitted" ? "Submitted" : s === "draft" ? "In progress" : "Not started";
+        html += '<button type="button" class="pitem' + (p.code === S.current ? " active" : "") + '" data-code="' + esc(p.code) + '">' +
+          '<span class="dot ' + (s === "new" ? "" : s) + '" title="' + label + '"></span>' +
+          '<span><span class="pt">' + esc(p.title) + '</span>' +
+          '<span class="pm" style="display:block"><b>' + esc(p.code) + "</b> &middot; " + esc(p.presenter) + " &middot; " + label + "</span></span></button>";
+      });
+    });
+    $("#plist").innerHTML = html || '<div class="empty small">No project matches your search.</div>';
+  }
+
+  $("#plist").addEventListener("click", function (e) {
+    var b = e.target.closest(".pitem");
+    if (b) openProject(b.getAttribute("data-code"));
+  });
+  $("#search").addEventListener("input", renderList);
+  $("#btnBack").addEventListener("click", function () { flushCurrent(); $("#grid").classList.remove("show-form"); window.scrollTo(0, 0); });
+  $("#btnRefresh").addEventListener("click", function () { flushCurrent(); chain.then(function () { return load(false); }).then(function () { KZ.toast("Up to date."); }); });
+
+  function openProject(code) {
+    flushCurrent();
+    S.current = code;
+    $("#grid").classList.add("show-form");
+    renderList(); renderForm();
+    var top = $("#formCard").getBoundingClientRect().top + window.pageYOffset - 12;
+    if (window.pageYOffset > top) window.scrollTo(0, top);
+  }
+
+  // ---------------- evaluation form ----------------
+  function renderForm() {
+    var card = $("#formCard");
+    if (!S.current) {
+      card.innerHTML = '<div class="empty"><h2>Select a project</h2><p>Choose a project from the list to start or continue its evaluation.<br>Your scores are saved automatically as you go.</p></div>';
+      return;
+    }
+    var p = project(S.current), cat = category(p.category), form = formOf(p), crit = criteriaOf(p), ev = evalOf(p.code), ro = readOnly(p.code);
+    var html = '<div class="form-head"><div class="row"><span class="pill cat">' + esc(cat.name) + '</span><span class="pill">' + esc(p.code) + "</span>" +
+      (ev.status === "submitted" ? '<span class="pill ok">Submitted ' + esc(KZ.dt(ev.submitted_at)) + "</span>" : "") + "</div>" +
+      "<h1>" + esc(p.title) + '</h1><div class="muted">Presenter: <b style="color:var(--text)">' + esc(p.presenter) + "</b></div></div>";
+
+    if (ev.status === "submitted") {
+      html += '<div style="padding:14px 20px 0"><div class="notice ok">This evaluation is submitted and locked. If something needs correcting, ask an admin to reopen it for you.</div></div>';
+    }
+    html += '<div class="scale"><span><b>Rating 1&ndash;' + form.scale_max + ":</b></span>" + form.scale.map(function (b) {
+      return "<span><b>" + (b.from === b.to ? b.from : b.from + "&ndash;" + b.to) + "</b> " + esc(b.label) + "</span>";
+    }).join("") + "</div>";
+
+    var lastSection = null, n = 0;
+    crit.forEach(function (c) {
+      if (c.section_no !== lastSection) {
+        lastSection = c.section_no;
+        var sw = crit.filter(function (x) { return x.section_no === c.section_no; }).reduce(function (a, x) { return a + Number(x.weight); }, 0);
+        html += '<div class="section-title"><span>' + esc(c.section) + "</span><span>" + sw + "% of the form</span></div>";
+      }
+      n++;
+      var cur = ev.scores[c.id] || 0, cmt = ev.comments[c.id] || "", wide = form.scale_max <= 5;
+      html += '<div class="crit" data-crit="' + c.id + '"><div class="crit-top"><span class="crit-no">' + n + '</span>' +
+        '<span class="crit-name">' + esc(c.name) + '</span><span class="crit-w">Weight ' + Number(c.weight) + "%</span></div><ul>" +
+        c.points.map(function (pt) { return "<li>" + esc(pt) + "</li>"; }).join("") + "</ul>" +
+        (c.help ? '<details class="crit-help"><summary>What judges should look for</summary>' +
+          (c.help.meaning ? "<p><b>Meaning:</b> " + esc(c.help.meaning) + "</p>" : "") +
+          (c.help.looks_for ? "<p><b>Look for:</b> " + esc(c.help.looks_for) + "</p>" : "") + "</details>" : "") +
+        '<div class="scores' + (wide ? " labelled" : "") + '" style="--n:' + form.scale_max + '" role="radiogroup" aria-label="Rating for ' + esc(c.name) + '">';
+      for (var i = 1; i <= form.scale_max; i++) {
+        html += '<button type="button" class="score-btn' + (cur === i ? " on" : "") + '" role="radio" aria-checked="' + (cur === i) +
+          '" data-score="' + i + '"' + (ro ? " disabled" : "") + "><b>" + i + "</b>" + (wide ? "<small>" + esc(KZ.band(form, i)) + "</small>" : "") + "</button>";
+      }
+      var showCmt = !!cmt || lowRating(form, cur);
+      html += '</div><div class="crit-band">' + bandText(form, cur) +
+        (ro || showCmt ? "" : ' <button type="button" class="btn link small add-cmt">Add comment</button>') + "</div>" +
+        '<div class="crit-cmt"' + (showCmt ? "" : " hidden") + '><textarea class="cmt" maxlength="600" rows="2" placeholder="' +
+        (lowRating(form, cur) ? "Comment recommended for a low rating" : "Comment (optional)") + '"' + (ro ? " disabled" : "") + ">" + esc(cmt) + "</textarea></div></div>";
+    });
+
+    html += '<div class="notes-box"><label class="field" style="margin:0"><span>Notes and recommendations (optional)</span>' +
+      '<textarea id="notes" maxlength="2000" placeholder="Strengths, areas to improve, remarks for the team"' + (ro ? " disabled" : "") + ">" +
+      esc(ev.notes) + "</textarea></label></div>";
+
+    html += '<div class="savebar"><div class="total-box"><div class="lbl">Weighted score</div><div class="val"><span id="totalVal"></span><small> / 100</small></div></div>' +
+      '<div class="save-info"><div class="small"><b id="answered"></b> criteria scored</div><div class="save-state" id="saveState"></div></div><span class="spacer"></span>' +
+      (ev.status === "submitted"
+        ? '<button type="button" class="btn primary" id="btnNext">Next project &rarr;</button>'
+        : '<button type="button" class="btn accent" id="btnSubmit"' + (ro ? " disabled" : "") + ">Submit evaluation</button>") + "</div>";
+
+    card.innerHTML = html;
+    updateTotals();
+    setSaveState(ev.status === "draft" && ev.updated_at ? "saved" : "", ev.updated_at ? new Date(ev.updated_at) : null);
+  }
+
+  function bandText(form, score) { return score ? "Selected: <b>" + score + "</b> &middot; " + esc(KZ.band(form, score)) : "Not rated yet"; }
+
+  function updateTotals() {
+    var p = project(S.current), crit = criteriaOf(p), ev = evalOf(p.code);
+    var done = crit.filter(function (c) { return ev.scores[c.id]; }).length;
+    $("#totalVal").textContent = KZ.pct(KZ.weightedTotal(crit, ev.scores, formOf(p).scale_max));
+    $("#answered").textContent = done + " of " + crit.length;
+  }
+
+  function setSaveState(kind, when) {
+    var el = $("#saveState");
+    if (!el) return;
+    el.className = "save-state" + (kind === "error" ? " err" : kind === "saved" ? " ok" : "");
+    el.innerHTML = kind === "saving" ? "Saving..."
+      : kind === "pending" ? "Unsaved changes..."
+      : kind === "saved" ? "Draft saved at " + KZ.time(when)
+      : kind === "error" ? 'Not saved. <button type="button" class="btn link" id="btnRetry">Try again</button>'
+      : "";
+  }
+
+  $("#formCard").addEventListener("click", function (e) {
+    var sb = e.target.closest(".score-btn");
+    if (sb && !sb.disabled) {
+      var box = sb.closest(".crit"), id = box.getAttribute("data-crit"), val = Number(sb.getAttribute("data-score"));
+      var ev = evalOf(S.current), form = formOf(project(S.current));
+      ev.scores[id] = val; ev.dirty = true;
+      if (ev.status === "new") ev.status = "draft";
+      $all(".score-btn", box).forEach(function (b) {
+        var on = Number(b.getAttribute("data-score")) === val;
+        b.classList.toggle("on", on); b.setAttribute("aria-checked", on);
+      });
+      var cmtBox = $(".crit-cmt", box), low = lowRating(form, val);
+      if (low) cmtBox.hidden = false;
+      $(".cmt", box).placeholder = low ? "Comment recommended for a low rating" : "Comment (optional)";
+      $(".crit-band", box).innerHTML = bandText(form, val) + (cmtBox.hidden ? ' <button type="button" class="btn link small add-cmt">Add comment</button>' : "");
+      box.classList.remove("missing");
+      updateTotals(); scheduleSave();
+      return;
+    }
+    var ac = e.target.closest(".add-cmt");
+    if (ac) {
+      var cb = ac.closest(".crit");
+      $(".crit-cmt", cb).hidden = false; ac.parentNode.removeChild(ac); $(".cmt", cb).focus();
+      return;
+    }
+    if (e.target.id === "btnSubmit") return submitCurrent();
+    if (e.target.id === "btnRetry") return flushCurrent();
+    if (e.target.id === "btnNext") {
+      var next = S.data.projects.filter(function (p) { return statusOf(p.code) !== "submitted"; })[0];
+      if (next) openProject(next.code); else { $("#grid").classList.remove("show-form"); KZ.toast("All evaluations are submitted."); }
+    }
+  });
+  $("#formCard").addEventListener("input", function (e) {
+    var ev;
+    if (e.target.classList.contains("cmt")) {
+      ev = evalOf(S.current);
+      var cid = e.target.closest(".crit").getAttribute("data-crit");
+      if (e.target.value.trim()) ev.comments[cid] = e.target.value; else delete ev.comments[cid];
+    } else if (e.target.id === "notes") {
+      ev = evalOf(S.current);
+      ev.notes = e.target.value;
+    } else return;
+    ev.dirty = true;
+    if (ev.status === "new") ev.status = "draft";
+    scheduleSave();
+  });
+
+  // ---------------- saving ----------------
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    setSaveState("pending");
+    saveTimer = setTimeout(flushCurrent, 800);
+  }
+  function flushCurrent() {
+    clearTimeout(saveTimer);
+    if (S.current && S.evals[S.current] && S.evals[S.current].dirty) queueSave(S.current);
+  }
+  function queueSave(code) {
+    chain = chain.then(function () { return doSave(code); });
+    return chain;
+  }
+  function doSave(code) {
+    var ev = S.evals[code];
+    if (!S.session || !ev || !ev.dirty || ev.status === "submitted") return;
+    ev.dirty = false;
+    if (code === S.current) setSaveState("saving");
+    return KZ.rpc("kz_judge_save", { p_token: token(), p_project: code, p_scores: ev.scores, p_comments: ev.comments, p_notes: ev.notes, p_submit: false })
+      .then(function (r) {
+        ev.updated_at = r.updated_at; ev.total = Number(r.total); ev.status = r.status;
+        if (code === S.current && !ev.dirty) setSaveState("saved", new Date());
+        renderList();
+      }, function (e) {
+        ev.dirty = true;
+        if (code === S.current) setSaveState("error");
+        fail(e);
+      });
+  }
+
+  function submitCurrent() {
+    var code = S.current, p = project(code), crit = criteriaOf(p), ev = evalOf(code);
+    var missing = crit.filter(function (c) { return !ev.scores[c.id]; });
+    $all(".crit").forEach(function (box) {
+      box.classList.toggle("missing", missing.some(function (c) { return String(c.id) === box.getAttribute("data-crit"); }));
+    });
+    if (missing.length) {
+      KZ.toast(missing.length + (missing.length === 1 ? " criterion is" : " criteria are") + " not scored yet.", "error");
+      var first = $(".crit.missing");
+      if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    KZ.modal({
+      title: "Submit this evaluation?",
+      okText: "Submit evaluation",
+      body: "<p><b>" + esc(p.code) + "</b> &middot; " + esc(p.title) + "</p>" +
+        '<p>Your weighted score: <b style="font-size:18px;color:var(--teal-dark)">' + KZ.pct(KZ.weightedTotal(crit, ev.scores, formOf(p).scale_max)) + " / 100</b></p>" +
+        "<p class=\"muted\">After you submit, the evaluation is locked. Only an admin can reopen it.</p>",
+      onOk: function () {
+        clearTimeout(saveTimer);
+        return chain.then(function () {
+          return KZ.rpc("kz_judge_save", { p_token: token(), p_project: code, p_scores: ev.scores, p_comments: ev.comments, p_notes: ev.notes, p_submit: true });
+        }).then(function (r) {
+          ev.dirty = false; ev.status = r.status; ev.total = Number(r.total); ev.comments = r.comments || ev.comments;
+          ev.updated_at = r.updated_at; ev.submitted_at = r.submitted_at;
+          renderList(); renderForm();
+          KZ.toast("Evaluation submitted.");
+        }, function (e) {
+          if (e.code === "KZ_SESSION") { KZ.closeModal(); showLogin(e.message); return false; }
+          if (e.code === "KZ_LOCKED" || e.code === "KZ_JUDGING_CLOSED") load(false);
+          throw e;
+        });
+      }
+    });
+  }
+
+  // refresh quietly when the judge comes back to the tab (e.g. after an admin reopened something)
+  window.addEventListener("focus", function () {
+    if (!S.session || !S.data || Date.now() - S.lastLoad < 30000) return;
+    var dirty = Object.keys(S.evals).some(function (c) { return S.evals[c].dirty; });
+    if (!dirty && !KZ.$("#modalWrap")) load(false);
+  });
+  window.addEventListener("beforeunload", function (e) {
+    var dirty = Object.keys(S.evals).some(function (c) { return S.evals[c].dirty; });
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  // ---------------- start ----------------
+  S.session = store.get();
+  if (S.session) load(true); else showLogin("");
+})();
+</script>
+</body>
+</html>
