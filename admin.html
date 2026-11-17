@@ -183,13 +183,13 @@
       $("#whoName").textContent = d.user.full_name;
       $("#eventName").textContent = d.settings.event_name;
       document.title = "Admin Portal | " + d.settings.event_name;
-      $("#updatedAt").textContent = "Updated " + KZ.time();
+      $("#updatedAt").textContent = "Live · updated " + KZ.time();
       render();
       if (first) {
         clearInterval(S.timer);
         S.timer = setInterval(function () {
-          if (S.session && !KZ.$("#modalWrap") && !document.hidden && (S.tab === "progress" || S.tab === "results")) load(false);
-        }, 30000);
+          if (S.session && !KZ.$("#modalWrap") && !document.hidden && (S.tab === "progress" || S.tab === "results" || S.tab === "prizes")) load(false);
+        }, 15000);
       }
     }).catch(function (e) {
       if (first || (e && e.code === "KZ_SESSION")) showLogin(e.message); else fail(e);
@@ -291,6 +291,10 @@
     $all(".tab").forEach(function (b) { b.classList.toggle("on", b === t); });
     render();
     if (S.tab === "audit") loadAudit();
+  });
+  // Catch up right away when the admin comes back to this browser tab.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && S.session && S.D && !KZ.$("#modalWrap") && (S.tab === "progress" || S.tab === "results" || S.tab === "prizes")) load(false);
   });
   $("#btnRefresh").addEventListener("click", function () {
     load(false).then(function () { if (S.tab === "audit") loadAudit(); KZ.toast("Up to date."); });
